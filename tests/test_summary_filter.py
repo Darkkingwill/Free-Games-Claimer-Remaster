@@ -16,6 +16,8 @@ GAMES = [
     {"title": "Owned", "url": "", "status": "existed"},
     {"title": "Checked in", "url": "", "status": "already claimed today ✨"},
     {"title": "F2P", "url": "", "status": "skipped:f2p"},
+    {"title": "Not free", "url": "", "status": "skipped:not-free"},
+    {"title": "Not collected", "url": "", "status": "failed (not collected)"},
     {"title": "Missing base", "url": "", "status": "failed:missing_base"},
     {"title": "Missing base again", "url": "", "status": "skipped:missing_base"},
     {"title": "Broken", "url": "", "status": "failed"},
@@ -26,7 +28,7 @@ GAMES = [
     {"title": "GOG refused", "url": "", "status": "failed: Giveaway is over"},
 ]
 
-FAILURES = {"Missing base", "Broken", "Flagged", "GOG refused"}
+FAILURES = {"Missing base", "Broken", "Flagged", "GOG refused", "Not collected"}
 
 
 class _Cfg:
@@ -61,12 +63,13 @@ def summary_filter():
 
 
 def test_defaults_show_changes_and_failures(summary_filter):
-    assert set(summary_filter(_Cfg())) == {"Claimed", "Dry", "Download once"} | FAILURES
+    # A skip that says why (here: the page sells the game) is reported like a failure; the repeating ones are not.
+    assert set(summary_filter(_Cfg())) == {"Claimed", "Dry", "Download once", "Not free"} | FAILURES
 
 
 def test_claim_fails_can_be_switched_off(summary_filter):
     # AliExpress and GOG used to write failures without the word, so they stayed whatever you set.
-    assert summary_filter(_Cfg(fails=False)) == ["Claimed", "Dry", "Download once"]
+    assert summary_filter(_Cfg(fails=False)) == ["Claimed", "Not free", "Dry", "Download once"]
 
 
 def test_already_claimed_can_be_switched_on(summary_filter):
@@ -160,7 +163,7 @@ class TestWhatNeededYou:
         assert main._KEY_TO_DISPLAY["itchio"] == "Itch.io" and main._KEY_TO_DISPLAY["legacygames"] == "Legacy Games"
 
     def test_it_is_not_filtered_like_a_game(self):
-        # "skipped" in a game status is dropped by default, so this line is its own section.
+        # It does not come from a game's status, so this line is its own section.
         assert self.SOURCE.index(self.LINE) > self.SOURCE.index("relevant_games = [")
 
     def test_every_run_starts_without_yesterdays_note(self):
@@ -173,7 +176,8 @@ class TestNeededYouArrivesWithoutGames:
     SOURCE = MAIN_PY.read_text(encoding="utf-8")
 
     def test_the_summary_is_built_when_only_a_store_waited(self):
-        assert "if cfg.notify_summary and (aggregated_results or waiting_for_you()):" in self.SOURCE
+        assert "if cfg.notify_summary:" in self.SOURCE
+        assert "waiting_for_you().items()" in self.SOURCE
 
 
 class TestTheRunBannerNamesEverySite:
@@ -182,3 +186,16 @@ class TestTheRunBannerNamesEverySite:
     def test_sites_go_through_their_display_names(self):
         banner = MAIN_PY.read_text(encoding="utf-8").split("Starting claiming run", 1)[1][:200]
         assert "_KEY_TO_DISPLAY.get(k, k) for k in sides" in banner
+
+
+class TestARunAlwaysSaysHowItEnded:
+    """A silent run looks the same as one that never happened."""
+
+    SOURCE = MAIN_PY.read_text(encoding="utf-8")
+
+    def test_a_run_with_nothing_to_report_still_sends_a_line(self):
+        tail = self.SOURCE.split("await notify(final_msg)", 1)[1][:500]
+        assert "elif not cfg.dryrun:" in tail and "nothing new to claim" in tail
+
+    def test_it_names_what_was_already_owned(self):
+        assert "already owned" in self.SOURCE.split("quiet = []", 1)[1]

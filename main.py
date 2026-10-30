@@ -529,22 +529,25 @@ async def run_claimers() -> None:
             logger.exception("Failed to activate pending Steam keys")
 
     # Final Summary Notification
-    # A store that only waited for you returns no games, and "Needed you" must still arrive.
-    if cfg.notify_summary and (aggregated_results or waiting_for_you()):
+    # Every run ends with one message: what was claimed, skipped or failed, who needed you, or that nothing was new.
+    if cfg.notify_summary:
         from src.core.notifier import format_game_list, markdown_safe
         msg_parts = []
+        quiet = []  # stores whose entries were all games you already own, for the "nothing new" message
         for result in aggregated_results:
             # Skip stores whose notifications are silenced (NOTIFY_SKIP_STORES).
             if not cfg.store_notify_enabled(_store_key(result.get("store", ""))):
                 continue
-            # Owned and skipped entries need NOTIFY_ALREADY_CLAIMED (off), failed ones NOTIFY_CLAIM_FAILS (on).
+            # Owned entries and the skips that repeat every run (free-to-play, download-only) need
+            # NOTIFY_ALREADY_CLAIMED (off). Any other skip is reported, and so is a failure unless
+            # NOTIFY_CLAIM_FAILS is turned off.
             keep_owned = cfg.notify_already_claimed
             relevant_games = [
                 g for g in result["games"]
                 if "status" in g
                 and (keep_owned or "exist" not in g["status"].lower())
                 and (keep_owned or "already" not in g["status"].lower())
-                and (keep_owned or "skip" not in g["status"].lower() or "dry run" in g["status"].lower())
+                and (keep_owned or not any(q in g["status"].lower() for q in ("skipped:f2p", "skipped:download-only")))
                 and (cfg.notify_claim_fails or "fail" not in g["status"].lower())
                 and (cfg.notify_missing_base or "missing_base" not in g["status"].lower())
                 and "skipped:missing_base" not in g["status"].lower()
@@ -554,6 +557,7 @@ async def run_claimers() -> None:
             if not relevant_games:
                 logger.debug("Summary: nothing to report for %s (all %d entr(ies) filtered out)",
                              result.get("store"), len(result["games"]))
+                quiet.append(f"{result['store']}: {len(result['games'])} already owned")
                 continue
                 
             # The mask's "***" would open bold on Discord and Telegram and swallow the line below.
@@ -561,7 +565,6 @@ async def run_claimers() -> None:
             header = f"**{result['store']}** ({account}):" if account else f"**{result['store']}**:"
             msg_parts.append(f"{header}\n{format_game_list(relevant_games)}")
             
-        # Kept out of the per-store lists: the summary filter drops anything that says "skipped".
         stuck = {(name, why, item): n for (name, why, item), n in waiting_for_you().items() if cfg.store_notify_enabled(name)}
         if stuck:
             lines = [f"**{_KEY_TO_DISPLAY.get(name, name.title())}**: {describe_wait(why, count, item)}"
@@ -573,6 +576,10 @@ async def run_claimers() -> None:
             if cfg.dryrun:
                 final_msg = "🛑 **DRY RUN SUMMARY: games remaining to be claimed**\n\n" + final_msg
             await notify(final_msg)
+        elif not cfg.dryrun:
+            # Silence would look the same as a run that never happened, so say it finished and found nothing.
+            await notify("✔ **Free games run finished:** nothing new to claim, nothing skipped, nothing failed."
+                         + "".join(f"\n• {line}" for line in quiet))
 
     logger.info("✔ Claiming run complete.")
 
