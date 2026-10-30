@@ -74,6 +74,8 @@ jobs:
             type=raw,value=latest,enable=${{ github.event_name == 'release' }}
             type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
             type=raw,value=manual,enable=${{ github.event_name == 'workflow_dispatch' }}
+            # This fork: every push to main is also :latest, what the Unraid template pulls.
+            type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix=sha-
 
       - name: Build and push Docker image
@@ -82,7 +84,7 @@ jobs:
           context: .
           push: true
           no-cache: true
-          # Same platforms as Docker Hub, so Raspberry Pi users can pull from GHCR too.
-          platforms: linux/amd64,linux/arm64
+          # This fork runs on an x86 server only; skipping arm64 avoids the slow QEMU build.
+          platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
