@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from src.stores.prime import PrimeGamingClaimer, is_code_screen
+from src.stores.prime import PrimeGamingClaimer, collected_on_page, is_account_linked, is_code_screen
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -164,3 +164,36 @@ class TestACodeNotReadIsLookedForAgain:
 
     def test_the_dead_filter_is_gone(self):
         assert "existing_codes_map" not in self.SOURCE
+
+
+class TestCollectedOnPage:
+    """Prime's page is the proof for a game sent to a linked account: there is no code to read."""
+
+    @pytest.mark.parametrize("text", [
+        "Trash Goblin Game You collected this on Oct 29, 2026. Sent to your Epic Games Store library: Darkkingwill",
+        "Ad Infinitum Details Success, Ad Infinitum will be available to play from your Epic Games Store library.",
+        "YOU   COLLECTED THIS on Nov 5",
+    ])
+    def test_a_collected_game_is_recognised(self, text):
+        assert collected_on_page(text)
+
+    @pytest.mark.parametrize("text", [
+        # The unclaimed page of Ad Infinitum, copied from the real thing.
+        "Ad Infinitum Game Available through Nov 25, 2026 (in 27 days) Send to your Epic Games Store library: Darkkingwill Get game",
+        # "available to play" alone, as in a FAQ, is not a success message.
+        "Your claimed games will be available to play from your Epic Games Store library once linked.",
+        "",
+        None,
+    ])
+    def test_an_unclaimed_page_is_not(self, text):
+        assert not collected_on_page(text)
+
+
+class TestIsAccountLinked:
+    @pytest.mark.parametrize("store", ["epic games", "Epic", "amazon", "amazon luna", "luna"])
+    def test_epic_and_amazon_go_to_a_linked_account(self, store):
+        assert is_account_linked(store)
+
+    @pytest.mark.parametrize("store", ["gog", "legacy games", "microsoft store", "", None, "unknown"])
+    def test_code_stores_do_not(self, store):
+        assert not is_account_linked(store)

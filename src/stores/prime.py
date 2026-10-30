@@ -78,6 +78,25 @@ def is_code_screen(state: dict) -> bool:
     return any(marker in body for marker in _CODE_MARKERS)
 
 
+# Games Prime sends to an account you linked (Epic, Amazon): there is no code to read, so the page is the proof.
+LINKED_STORES = ("epic", "amazon", "luna")
+
+
+def is_account_linked(store) -> bool:
+    """True for a store Prime delivers to by account link, where nothing is redeemed with a code."""
+    return any(kw in str(store or "").lower() for kw in LINKED_STORES)
+
+
+def collected_on_page(text) -> bool:
+    """True when a game's Prime page says it was collected.
+
+    That is "You collected this on ..." on a later visit, or the "Success, ... will be available to play
+    from your ... library" message straight after the click.
+    """
+    low = " ".join(str(text or "").lower().split())
+    return "you collected this" in low or ("success" in low and "available to play from your" in low)
+
+
 class PrimeGamingClaimer(BaseClaimer):
     store_name = "prime"
     # Set when a sign-in lost mid-run could not be restored, so the claim loop stops.
@@ -955,6 +974,50 @@ class PrimeGamingClaimer(BaseClaimer):
             logger.exception("Failed to claim '%s'", title)
             self.notify_games.append({"title": title, "url": url, "status": "failed"})
 
+    async def _page_text(self) -> str:
+        """The visible text of the page, for checks that must not depend on a selector."""
+        return str(await self.page.evaluate("document.body ? document.body.innerText : ''") or "")
+
+    async def _press_get_game(self) -> None:
+        """Press the "Get game" / "Claim" / "Complete Claim" button of a detail page with a real mouse click.
+
+        A script click did not always register: Ad Infinitum stayed unclaimed on Prime while the log said claimed.
+        The button is found by its exact text, as before, and a script click remains the fallback.
+        """
+        marked = await self.page.evaluate(
+            """
+            (() => {
+                const texts = ["Get game", "Claim", "Complete Claim"];
+                for (const el of document.querySelectorAll('button, a')) {
+                    if (texts.includes(el.textContent.trim()) && el.offsetParent !== null) {
+                        el.setAttribute('data-fgc-claim', '1');
+                        return true;
+                    }
+                }
+                return false;
+            })()
+            """
+        )
+        if not marked:
+            return
+        try:
+            button = await self.page.select('[data-fgc-claim="1"]', timeout=3)
+            await button.mouse_click()
+            return
+        except Exception:
+            logger.debug("Real click on the claim button failed, trying a script click.", exc_info=True)
+        await self.page.evaluate("document.querySelector('[data-fgc-claim=\"1\"]')?.click()")
+
+    async def _save_linked_claim(self, title: str, url: str, store: str) -> None:
+        """Remember a game that went to a linked account, so it is not revisited."""
+        async with async_session() as session:
+            obj, _ = await get_or_create(
+                session, store="prime", user=self.user or "unknown",
+                game_id=title, title=title, url=url, status="claimed",
+            )
+            obj.extra = json.dumps({"external_store": store})
+            await session.commit()
+
     async def _claim_single_external(self, game_info: dict) -> None:
         """Claim an external Prime Gaming game – get the code, redeem GOG, log others."""
         title = game_info.get("title", "Unknown")
@@ -1046,22 +1109,14 @@ class PrimeGamingClaimer(BaseClaimer):
             if not detail_url:
                 await self.sleep(4)
 
-            # Click "Get game" / "Claim" / "Complete Claim" button
-            await self.page.evaluate(
-                """
-                (() => {
-                    const texts = ["Get game", "Claim", "Complete Claim"];
-                    const els = document.querySelectorAll('button, a');
-                    for (const el of els) {
-                        const txt = el.textContent.trim();
-                        if (texts.includes(txt) && el.offsetParent !== null) {
-                            el.click();
-                            return;
-                        }
-                    }
-                })()
-                """
-            )
+            # A game for a linked account that the page already shows as collected has nothing left to click.
+            if is_account_linked(platform) and collected_on_page(await self._page_text()):
+                logger.info("'%s' is already collected on Prime, nothing to click.", title)
+                await self._save_linked_claim(title, url, platform)
+                self.notify_games.append({"title": title, "url": url, "status": f"already collected ({platform})"})
+                return
+
+            await self._press_get_game()
             await self.sleep(4)
 
             # Use platform from URL slug as primary store identification
@@ -1125,19 +1180,21 @@ class PrimeGamingClaimer(BaseClaimer):
             
             logger.info("External game '%s' on store: %s", title, store)
 
-            # Fast bail-out for account-linked platforms (Epic, Amazon, Luna) – no code to extract
-            store_lower = str(store).lower()
-            if any(kw in store_lower for kw in ('epic', 'amazon', 'luna')):
-                logger.info("Skipping '%s' – platform '%s' uses account linking, no code.", title, store)
-                # Save to DB so we don't revisit
-                async with async_session() as session:
-                    obj, _ = await get_or_create(
-                        session, store="prime", user=self.user or "unknown",
-                        game_id=title, title=title, url=url, status="claimed",
-                    )
-                    obj.extra = json.dumps({"external_store": store})
-                    await session.commit()
-                self.notify_games.append({"title": title, "url": url, "status": f"skipped ({store})"})
+            # Account-linked platforms (Epic, Amazon, Luna) have no code to extract. The click only counts once
+            # the page says the game is collected; otherwise it is not stored, so the next run goes back for it.
+            if is_account_linked(store):
+                collected = collected_on_page(await self._page_text())
+                if not collected:
+                    await self.page.get(url)
+                    await self.sleep(6)
+                    collected = collected_on_page(await self._page_text())
+                if collected:
+                    logger.info("✓ '%s' is collected and sent to your %s account.", title, store)
+                    await self._save_linked_claim(title, url, store)
+                    self.notify_games.append({"title": title, "url": url, "status": f"claimed ({store})"})
+                else:
+                    logger.warning("'%s' is still not collected on Prime after Get game, trying again next run.", title)
+                    self.notify_games.append({"title": title, "url": url, "status": "failed (not collected)"})
                 return
 
             # Try to get the redemption code
