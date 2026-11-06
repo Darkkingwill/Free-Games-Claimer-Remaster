@@ -74,8 +74,10 @@ RUN printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "5";\nAcquire::http::Ti
     && apt-get autoremove -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/* /var/tmp/* /tmp/* /usr/share/doc/* \
-    # Create a convenient noVNC landing page
-    && ln -s /usr/share/novnc/vnc_auto.html /usr/share/novnc/index.html \
+    # Create a convenient noVNC landing page. This is vnc.html, which reads defaults.json (vnc_auto.html does not):
+    # the screen is scaled to fit the browser window, so a phone shows all of it instead of one corner.
+    && ln -s /usr/share/novnc/vnc.html /usr/share/novnc/index.html \
+    && echo '{"resize":"scale"}' > /usr/share/novnc/defaults.json \
     # Make "python" command available (Debian only has "python3" by default)
     && ln -sf /usr/bin/python3 /usr/bin/python
 
